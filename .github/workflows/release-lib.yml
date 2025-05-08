@@ -1,4 +1,4 @@
-name: Build and Release DLL+LIB
+name: Cross-Platform Release
 
 on:
   push:
@@ -10,52 +10,64 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: dll
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: so
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: dylib
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          target: x86_64-pc-windows-msvc
+          target: ${{ matrix.target }}
           override: true
 
-      - name: Build DLL and LIB
-        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Build ${{ matrix.ext }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Save Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.ext }}
+          path: target/${{ matrix.target }}/release/*.${{ matrix.ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
 
       - name: Extract Version
         id: extract
-        shell: pwsh
         run: |
-          $content = Get-Content Cargo.toml
-          $inPackage = $false
-          foreach ($line in $content) {
-            if ($line -match '^\[.*\]') {
-              $inPackage = ($line -eq '[package]')
-            } elseif ($inPackage -and $line -match '^\s*version\s*=\s*"(.*?)"') {
-              $matches[1] | Out-File -FilePath version.txt -Encoding utf8
-              echo "version=$($matches[1])" >> $env:GITHUB_OUTPUT
-              break
-            }
-          }
-
+          version=$(awk '/\[package\]/ {p=1} p && /^version/ {gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Generate timestamp
         id: timestamp
-        run: |
-          $now = Get-Date -Format "dd-MM-yyyy HH:mm"
-          echo "now=$now" >> $env:GITHUB_OUTPUT
+        run: echo "now=$(date '+%d-%m-%Y %H:%M')" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ steps.extract.outputs.version }} - ${{ steps.timestamp.outputs.now }}
           tag_name: v${{ steps.extract.outputs.version }}
-          files: |
-            target/x86_64-pc-windows-msvc/release/*.dll
-            target/x86_64-pc-windows-msvc/release/*.lib
+          files: dist/**/*.{dll,lib,so,dylib}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
