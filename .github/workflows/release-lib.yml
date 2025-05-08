@@ -2,6 +2,7 @@ name: Build and Release DLL+LIB
 
 on:
   push:
+    branches: [main]
     paths:
       - '**/*.rs'
       - 'Cargo.toml'
@@ -34,10 +35,16 @@ jobs:
           })
           echo "version=$version" >> $env:GITHUB_OUTPUT
 
+      - name: Generate timestamp
+        id: timestamp
+        run: |
+          $now = Get-Date -Format "dd-MM-yyyy HH:mm"
+          echo "now=$now" >> $env:GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ steps.extract.outputs.version }}
+          name: Release ${{ steps.extract.outputs.version }} - ${{ steps.timestamp.outputs.now }}
           tag_name: v${{ steps.extract.outputs.version }}
           files: |
             target/x86_64-pc-windows-msvc/release/*.dll
