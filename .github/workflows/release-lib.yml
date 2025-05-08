@@ -64,8 +64,13 @@ jobs:
         with:
           path: dist
 
-      - name: List downloaded files
-        run: find dist/ -type f
+      - name: Collect all artifact paths
+        id: artifacts
+        run: |
+          find dist/ -type f
+          files=$(find dist/ -type f | tr '\n' ',')
+          echo "files=$files" >> $GITHUB_OUTPUT
+
 
       - name: Extract Version
         id: extract
@@ -82,6 +87,6 @@ jobs:
         with:
           name: Release ${{ steps.extract.outputs.version }} - ${{ steps.timestamp.outputs.now }}
           tag_name: v${{ steps.extract.outputs.version }}
-          files: dist/**/*.{dll,lib,so,dylib}
+          files: ${{ steps.artifacts.outputs.files }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
