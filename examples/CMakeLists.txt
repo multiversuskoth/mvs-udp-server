@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Add the Rust shared library
 set(RUST_LIB_PATH "../target/debug")
-set(RUST_LIB_NAME "mvs_p2p_rollback_server")
+set(RUST_LIB_NAME "mvsi_p2p_rollback_server")
 
 # Include the Rust library
 link_directories(${RUST_LIB_PATH})

@@ -1,5 +1,5 @@
 [package]
-name = "mvs_p2p_rollback_server"
+name = "mvsi_p2p_rollback_server"
 version = "0.1.0"
 edition = "2021"
 
