@@ -37,6 +37,12 @@ jobs:
       - name: Build ${{ matrix.ext }}
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Rename import library (Windows only)
+        if: matrix.os == 'windows-latest'
+        run: |
+          mv target/${{ matrix.target }}/release/mvsi_p2p_rollback_server.dll.lib `
+            target/${{ matrix.target }}/release/mvsi_p2p_rollback_server.lib
+
       - name: Save Artifact
         uses: actions/upload-artifact@v4
         with:
