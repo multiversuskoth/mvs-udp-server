@@ -21,8 +21,8 @@ use reqwest::Client;
 use serializer::{parse_client_message, serialize_server_message};
 use tokio::{net::UdpSocket, sync::Mutex};
 
-const IP_ADDRESS: &str = "127.0.0.1:8080";
-const MVS_HTTP_ENDPOINT: &str = "http://localhost:8080";
+const IP_ADDRESS: &str = "127.0.0.1:41234";
+const MVS_HTTP_ENDPOINT: &str = "https://dokken-api.wbagora.com";
 
 enum ServerState {
     Idle,
@@ -87,6 +87,10 @@ impl P2PRollbackServer {
         }
 
         Ok(())
+    }
+
+    async fn send_udp_hole_punch(&self, target: &SocketAddr) {
+        self.send_message(ServerMessageType::MVS_HOLE_PUNCH, ServerMessagePayload::Empty(), target).await;
     }
 
     pub async fn send_message(&self, header_type: ServerMessageType, message: ServerMessagePayload, target: &SocketAddr) {

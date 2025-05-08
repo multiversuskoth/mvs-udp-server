@@ -1,8 +1,13 @@
-use std::{collections::HashMap, net::SocketAddr, time::Instant};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
+use anyhow::bail;
 use log::{debug, error, warn};
 use serde_json::json;
-use tokio::sync::MutexGuard;
+use tokio::{sync::MutexGuard, time::sleep};
 
 use crate::{
     message_types::{
@@ -12,6 +17,15 @@ use crate::{
     models::{game_match::GameMatch, player::Player},
     P2PRollbackServer,
 };
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct MVSIPlayer {
+    player_index: u64,
+    ip: String,
+    port: u64,
+    is_host: bool,
+}
 
 pub trait MessageHandler {
     async fn handle_new_connection(&self, payload: PlayerConnectionPaylod, src: SocketAddr) -> anyhow::Result<()>;
@@ -39,9 +53,9 @@ impl MessageHandler for P2PRollbackServer {
         if !current_match.ready {
             let response = self
                 .http_client
-                .post(format!("{}/register", self.http_endpoint))
+                .post(format!("{}/mvsi_register", self.http_endpoint))
                 .json(&json!({
-                    "match_id": payload.match_data.match_id,
+                    "matchId": payload.match_data.match_id,
                     "key": payload.match_data.key
                 }))
                 .send()
@@ -55,7 +69,7 @@ impl MessageHandler for P2PRollbackServer {
                         current_match.match_id = payload.match_data.match_id.clone();
                         current_match.match_key = payload.match_data.key.clone();
                         current_match.ready = true;
-                        current_match.match_duration = match_data["match_duration"].as_u64().unwrap_or(0) as u32;
+                        current_match.match_duration = match_data["matchDuration"].as_u64().unwrap_or(0) as u32;
                         current_match.num_players = max_players as u8;
                     }
                 }
@@ -75,33 +89,31 @@ impl MessageHandler for P2PRollbackServer {
     ) {
         let response = self
             .http_client
-            .post(&self.http_endpoint)
+            .post(format!("{}/mvsi_match_players", self.http_endpoint))
             .json(&json!({
-                "match_id": payload.match_data.match_id,
+                "matchId": payload.match_data.match_id,
                 "key": payload.match_data.key,
-                "player_index": payload.player_data.player_index,
             }))
             .send()
             .await;
-
+        let index = payload.player_data.player_index;
         match response {
-            Ok(resp) => {
-                if let Ok(player_data) = resp.json::<serde_json::Value>().await {
-                    if let (Some(index), Some(ip), Some(port), Some(is_host)) = (
-                        player_data["player_index"].as_u64(),
-                        player_data["ip"].as_str(),
-                        player_data["port"].as_u64(),
-                        player_data["isHost"].as_bool(),
-                    ) {
-                        if players.iter().any(|p| p.index == index as u16 && p.ip == ip && p.port == port as u16) {
-                            debug!("Player already exists: index={}, ip={}, port={}", index, ip, port);
+            Ok(resp) => match resp.json::<Vec<MVSIPlayer>>().await {
+                Ok(players_data) => {
+                    let pDataCopy = players_data.clone();
+                    for player_data in players_data {
+                        if players
+                            .iter()
+                            .any(|p| p.index == index as u16 && p.ip == player_data.ip && p.port == player_data.port as u16)
+                        {
+                            debug!("Player already exists: index={}, ip={}, port={}", index, player_data.ip, player_data.port);
                             return;
                         }
 
                         let socket = if src.ip() == std::net::IpAddr::V4("127.0.0.1".parse().unwrap()) {
                             src
                         } else {
-                            SocketAddr::new(ip.parse().unwrap(), port as u16)
+                            SocketAddr::new(player_data.ip.parse().unwrap(), player_data.port as u16)
                         };
 
                         let player = Player {
@@ -115,12 +127,12 @@ impl MessageHandler for P2PRollbackServer {
                             ping: 0,
                             last_client_frame: 0,
                             rift: 0.0,
-                            ip: ip.to_string(),
-                            port: port as u16,
+                            ip: player_data.ip.to_string(),
+                            port: player_data.port as u16,
                             acked_frames: vec![],
                             inputs: HashMap::new(),
                             missed_inputs: 0,
-                            is_host,
+                            is_host: player_data.is_host,
                             last_seq_received: 0,
                         };
                         let player_socket = player.socket;
@@ -135,9 +147,28 @@ impl MessageHandler for P2PRollbackServer {
                             unused_1: 0,
                         });
                         self.send_message(ServerMessageType::PlayerConnection, msg, &player_socket).await;
+
+                        if player_data.player_index == payload.player_data.player_index as u64 {
+                            let mut count = 0;
+                            loop {
+                                if count == 10 {
+                                    break;
+                                }
+                                for player_data in &pDataCopy {
+                                    if player_data.player_index != payload.player_data.player_index as u64 {
+                                        let target = SocketAddr::new(player_data.ip.parse().unwrap(), player_data.port as u16);
+
+                                        self.send_udp_hole_punch(&target).await;
+                                        sleep(Duration::from_millis(50)).await;
+                                    }
+                                }
+                                count += 1;
+                            }
+                        }
                     }
                 }
-            }
+                Err(e) => println!("ERROR {}",e.to_string()),
+            },
             Err(e) => {
                 error!("Failed to fetch players from HTTP endpoint: {}", e);
             }

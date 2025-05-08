@@ -6,9 +6,8 @@ use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::message_types::client_messages::{
-    ClientHeader, GameMatchData, ClientMessageType, ClientPayload, PlayerData, DisconnectingPayload, PlayerInputPayload, MatchResultPayload,
-    PlayerConnectionPaylod, PlayerDisconnectedAckPayload, PlayerInputAckPayload, PongPayload, ReadyForMatchPayload, UdpClientMessage,
-    CLIENT_HEADER_SIZE,
+    ClientHeader, ClientMessageType, ClientPayload, DisconnectingPayload, GameMatchData, MatchResultPayload, PlayerConnectionPaylod, PlayerData,
+    PlayerDisconnectedAckPayload, PlayerInputAckPayload, PlayerInputPayload, PongPayload, ReadyForMatchPayload, UdpClientMessage, CLIENT_HEADER_SIZE,
 };
 use crate::message_types::server_messages::{ServerMessagePayload, UdpServerMessage};
 
@@ -235,6 +234,10 @@ pub fn serialize_server_message(message: &UdpServerMessage, max_players: usize) 
         }
 
         ServerMessagePayload::StartGame(_) => {
+            // Empty payload
+        }
+
+        ServerMessagePayload::Empty() => {
             // Empty payload
         }
     };
