@@ -5,6 +5,7 @@ mod message_types;
 mod models;
 mod serializer;
 
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use anyhow::bail;
@@ -14,12 +15,22 @@ use message_handler::MessageHandler;
 use log::{error, info, warn};
 use message_types::{
     client_messages::{ClientMessageType, ClientPayload},
-    server_messages::{Header, PlayerGetReady, PlayerInputs, ServerMessagePayload, ServerMessageType, UdpServerMessage},
+    server_messages::{
+        Header, PlayerGetReady, PlayerInputs, ServerMessagePayload, ServerMessageType, UdpServerMessage,
+    },
 };
 use models::{game_match::GameMatch, player::Player};
 use reqwest::Client;
 use serializer::{parse_client_message, serialize_server_message};
+use tokio::sync::MutexGuard;
 use tokio::{net::UdpSocket, sync::Mutex};
+
+// Global static variable to hold port 4314
+static PORT_4314: AtomicU16 = AtomicU16::new(4314);
+
+pub fn get_mvsi_port() -> u16 {
+    PORT_4314.load(Ordering::SeqCst)
+}
 
 const IP_ADDRESS: &str = "127.0.0.1:41234";
 const MVS_HTTP_ENDPOINT: &str = "https://dokken-api.wbagora.com";
@@ -63,38 +74,57 @@ impl P2PRollbackServer {
         server
     }
 
-    async fn send_players_get_ready(&self) -> anyhow::Result<()> {
-        let players = self.current_state.players.lock().await;
+    async fn send_players_get_ready(
+        &self,
+        players: &mut MutexGuard<'_, Vec<Player>>,
+        current_match: &mut MutexGuard<'_, GameMatch>,
+    ) -> anyhow::Result<()> {
         let player_count = players.len().clone();
         for player in players.iter() {
             let msg = ServerMessagePayload::PlayerGetReady(PlayerGetReady {
                 num_players: player_count as u8,
                 raw_data: vec![0u8; 4 * player_count],
             });
-            self.send_message(ServerMessageType::PlayerGetReady, msg, &player.socket).await;
+            self.send_message(ServerMessageType::PlayerGetReady, msg, &player.socket, current_match)
+                .await;
         }
 
         Ok(())
     }
 
-    async fn send_game_start(&self) -> anyhow::Result<()> {
-        let players = self.current_state.players.lock().await;
+    async fn send_game_start(
+        &self,
+        players: &mut MutexGuard<'_, Vec<Player>>,
+        current_match: &mut MutexGuard<'_, GameMatch>,
+    ) -> anyhow::Result<()> {
         for player in players.iter() {
             let msg = ServerMessagePayload::StartGame {
                 0: message_types::server_messages::Empty {},
             };
-            self.send_message(ServerMessageType::StartGame, msg, &player.socket).await;
+            self.send_message(ServerMessageType::StartGame, msg, &player.socket, current_match)
+                .await;
         }
 
         Ok(())
     }
 
-    async fn send_udp_hole_punch(&self, target: &SocketAddr) {
-        self.send_message(ServerMessageType::MVSI_HOLE_PUNCH, ServerMessagePayload::Empty(), target).await;
+    async fn send_udp_hole_punch(&self, target: &SocketAddr, current_match: &mut MutexGuard<'_, GameMatch>) {
+        self.send_message(
+            ServerMessageType::MVSI_HOLE_PUNCH,
+            ServerMessagePayload::Empty(),
+            target,
+            current_match,
+        )
+        .await;
     }
 
-    pub async fn send_message(&self, header_type: ServerMessageType, message: ServerMessagePayload, target: &SocketAddr) {
-        let mut current_match = self.current_state.current_match.lock().await;
+    pub async fn send_message(
+        &self,
+        header_type: ServerMessageType,
+        message: ServerMessagePayload,
+        target: &SocketAddr,
+        current_match: &mut MutexGuard<'_, GameMatch>,
+    ) {
         let server_msg = UdpServerMessage {
             header: Header {
                 type_: header_type,
@@ -124,7 +154,8 @@ impl P2PRollbackServer {
     }
 
     async fn handle_incoming_message(&self, buf: &[u8], src: SocketAddr) -> anyhow::Result<()> {
-        let decompressed = decompress_packet(&buf, None).map_err(|e| anyhow::anyhow!("Failed to decompress packet: {}", e))?;
+        let decompressed =
+            decompress_packet(&buf, None).map_err(|e| anyhow::anyhow!("Failed to decompress packet: {}", e))?;
         let client_msg = match parse_client_message(decompressed.as_slice()) {
             Ok(msg) => msg,
             Err(e) => {
@@ -178,10 +209,11 @@ impl P2PRollbackServer {
         Ok(())
     }
 
-    async fn send_player_inputs(&self) -> anyhow::Result<()> {
-        let current_match = self.current_state.current_match.lock().await;
-        let mut players = self.current_state.players.lock().await;
-
+    async fn send_player_inputs(
+        &self,
+        players: &mut MutexGuard<'_, Vec<Player>>,
+        current_match: &mut MutexGuard<'_, GameMatch>,
+    ) -> anyhow::Result<()> {
         let peer_input_data: Vec<_> = players
             .iter()
             .enumerate()
@@ -237,9 +269,12 @@ impl P2PRollbackServer {
             });
 
             //recipient.last_sent_time = Some(Instant::now());
-            recipient.pending_pings.insert(current_match.sequence_number, Instant::now());
+            recipient
+                .pending_pings
+                .insert(current_match.sequence_number, Instant::now());
 
-            self.send_message(ServerMessageType::PlayerInputs, msg, &recipient.socket).await;
+            self.send_message(ServerMessageType::PlayerInputs, msg, &recipient.socket, current_match)
+                .await;
         }
 
         Ok(())
