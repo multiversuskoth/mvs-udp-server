@@ -1,7 +1,3 @@
-#include <iostream>
-#include <chrono>
-#include <thread>
-
 // Declare the Rust function
 extern "C" void start_rollback_server_cpp();
 
