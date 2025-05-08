@@ -56,7 +56,9 @@ struct P2PRollbackServer {
 
 impl P2PRollbackServer {
     pub async fn new() -> Self {
-        let socket = UdpSocket::bind(IP_ADDRESS).await.expect("Failed to bind socket");
+        let socket = UdpSocket::bind(format!("0.0.0.0:{}", get_mvsi_port()))
+            .await
+            .expect("Failed to bind socket");
         let current_state = Arc::new(SharedState {
             players: Arc::new(Mutex::new(Vec::new())),
             current_match: Arc::new(Mutex::new(GameMatch::new())),
