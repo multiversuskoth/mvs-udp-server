@@ -90,7 +90,7 @@ impl P2PRollbackServer {
     }
 
     async fn send_udp_hole_punch(&self, target: &SocketAddr) {
-        self.send_message(ServerMessageType::MVS_HOLE_PUNCH, ServerMessagePayload::Empty(), target).await;
+        self.send_message(ServerMessageType::MVSI_HOLE_PUNCH, ServerMessagePayload::Empty(), target).await;
     }
 
     pub async fn send_message(&self, header_type: ServerMessageType, message: ServerMessagePayload, target: &SocketAddr) {

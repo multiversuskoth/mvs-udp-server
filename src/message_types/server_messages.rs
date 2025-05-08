@@ -12,7 +12,7 @@ pub enum ServerMessageType {
     PlayerGetReady = 10,
     PlayerDisconnected = 11,
     Unknown2 = 12,
-    MVS_HOLE_PUNCH = 13
+    MVSI_HOLE_PUNCH = 13
 }
 
 impl From<u8> for ServerMessageType {
@@ -29,7 +29,7 @@ impl From<u8> for ServerMessageType {
             10 => ServerMessageType::PlayerGetReady,
             11 => ServerMessageType::PlayerDisconnected,
             12 => ServerMessageType::Unknown2,
-            13 => ServerMessageType::MVS_HOLE_PUNCH,
+            13 => ServerMessageType::MVSI_HOLE_PUNCH,
             _ => panic!("Unknown message type: {}", value),
         }
     }
