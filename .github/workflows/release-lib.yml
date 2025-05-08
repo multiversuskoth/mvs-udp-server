@@ -68,7 +68,7 @@ jobs:
         id: artifacts
         run: |
           find dist/ -type f
-          files=$(find dist/ -type f | tr '\n' ' ')
+          files=$(find dist/ -type f | tr '\n' ',')
           echo "files=$files" >> $GITHUB_OUTPUT
 
 
