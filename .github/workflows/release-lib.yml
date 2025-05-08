@@ -28,12 +28,20 @@ jobs:
 
       - name: Extract Version
         id: extract
+        shell: pwsh
         run: |
-          $version = (Select-String -Path "Cargo.toml" -Pattern 'version\s*=\s*"(.*?)"' | ForEach-Object {
-            ($_ -match '"(.*?)"') | Out-Null
-            $matches[1]
-          })
-          echo "version=$version" >> $env:GITHUB_OUTPUT
+          $content = Get-Content Cargo.toml
+          $inPackage = $false
+          foreach ($line in $content) {
+            if ($line -match '^\[.*\]') {
+              $inPackage = ($line -eq '[package]')
+            } elseif ($inPackage -and $line -match '^\s*version\s*=\s*"(.*?)"') {
+              $matches[1] | Out-File -FilePath version.txt -Encoding utf8
+              echo "version=$($matches[1])" >> $env:GITHUB_OUTPUT
+              break
+            }
+          }
+
 
       - name: Generate timestamp
         id: timestamp
