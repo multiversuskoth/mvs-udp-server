@@ -43,11 +43,14 @@ jobs:
           mv target/${{ matrix.target }}/release/mvsi_p2p_rollback_server.dll.lib `
             target/${{ matrix.target }}/release/mvsi_p2p_rollback_server.lib
 
-      - name: Save Artifact
+      - name: Save Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifact-${{ matrix.ext }}
-          path: target/${{ matrix.target }}/release/*.${{ matrix.ext }}
+          path: |
+            target/${{ matrix.target }}/release/*.${{ matrix.ext }}
+            target/${{ matrix.target }}/release/*.lib
+
 
   release:
     needs: build
@@ -55,11 +58,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      - name: List downloaded files
+        run: find dist/ -type f
 
       - name: Extract Version
         id: extract
