@@ -59,17 +59,19 @@ enum ServerState {
     MatchInProgress,
 }
 
+
 struct SharedState {
     players: Arc<Mutex<Vec<Player>>>,
     current_match: Arc<Mutex<GameMatch>>,
     current_state: Arc<Mutex<ServerState>>,
     passthrough: AtomicBool,
-    hostSocket: Option<SocketAddr>,
+    hostSocket: Arc<Mutex<Option<SocketAddr>>>,
 }
 
+#[derive(Clone)]
 struct P2PRollbackServer {
     socket: Arc<UdpSocket>,
-    current_state: SharedState,
+    current_state: Arc<SharedState>,
     http_client: reqwest::Client,
     http_endpoint: String,
 }
@@ -80,13 +82,13 @@ impl P2PRollbackServer {
             .await
             .expect("Failed to bind socket");
         info!("UDP Started at {}", socket.local_addr().unwrap());
-        let current_state = SharedState {
+        let current_state = Arc::new(SharedState {
             players: Arc::new(Mutex::new(Vec::new())),
             current_match: Arc::new(Mutex::new(GameMatch::new())),
             current_state: Arc::new(Mutex::new(ServerState::Idle)),
             passthrough: AtomicBool::new(false),
-            hostSocket: None,
-        };
+            hostSocket:  Arc::new(Mutex::new(None)),
+        });
 
         let http_client = Client::new();
 
@@ -179,7 +181,8 @@ impl P2PRollbackServer {
     }
 
     async fn handle_incoming_message(&mut self, buf: &[u8], src: SocketAddr) -> anyhow::Result<()> {
-        if let Some(host_socket) = self.current_state.hostSocket {
+
+        if let Some(host_socket) = *self.current_state.hostSocket.lock().await {
             info!("passthrough");
             self.socket.send_to(buf, host_socket).await?;
             return Ok(());
@@ -341,16 +344,14 @@ impl P2PRollbackServer {
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((_, addr)) => {
-                    tokio::spawn(async move {
-                        match self.handle_incoming_message(&buf, addr).await {
-                            Ok(_) => {
-                                //info!("Handled message from {:?}", addr);
-                            }
-                            Err(e) => {
-                                error!("Error handling message: {}", e);
-                            }
+                    match self.handle_incoming_message(&buf, addr).await {
+                        Ok(_) => {
+                            //info!("Handled message from {:?}", addr);
                         }
-                    });
+                        Err(e) => {
+                            error!("Error handling message: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Error receiving data: {}", e);

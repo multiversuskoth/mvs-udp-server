@@ -36,11 +36,7 @@ pub struct MVSIPlayer {
 pub trait MessageHandler {
     async fn handle_new_connection(&mut self, payload: PlayerConnectionPaylod, src: SocketAddr) -> anyhow::Result<()>;
 
-    async fn ping_players(
-        &self,
-        players: &mut MutexGuard<'_, Vec<Player>>,
-        current_match: &mut MutexGuard<'_, GameMatch>,
-    ) -> anyhow::Result<()>;
+    async fn ping_players(&self) -> anyhow::Result<()>;
     async fn handle_player_pong_response(&self, payload: PongPayload, src: SocketAddr) -> anyhow::Result<()>;
     async fn handle_player_ready(&self, payload: ReadyForMatchPayload, src: SocketAddr) -> anyhow::Result<()>;
 
@@ -187,7 +183,8 @@ impl MessageHandler for P2PRollbackServer {
                                 self.current_state.passthrough.store(true, Ordering::SeqCst);
                                 let target =
                                     SocketAddr::new(host_player_data.ip.parse().unwrap(), host_player_data.port as u16);
-                                self.current_state.hostSocket = Some(target);
+                                    let mut c = self.current_state.hostSocket.lock().await;
+                                    *c = Some(target);
                                 loop {
                                     if count == 10 {
                                         break;
@@ -224,7 +221,10 @@ impl MessageHandler for P2PRollbackServer {
         if current_match.ready {
             let all_connected = players.iter().filter(|p| p.connected).count() == current_match.num_players as usize;
             if all_connected {
-                self.ping_players(&mut players, &mut current_match).await?;
+                let server_clone = self.clone();
+                tokio::spawn(async move {
+                    server_clone.ping_players().await;
+                });
             }
         }
         Ok(())
@@ -254,12 +254,10 @@ impl MessageHandler for P2PRollbackServer {
         Ok(())
     }
 
-    async fn ping_players(
-        &self,
-        players: &mut MutexGuard<'_, Vec<Player>>,
-        current_match: &mut MutexGuard<'_, GameMatch>,
-    ) -> anyhow::Result<()> {
+    async fn ping_players(&self) -> anyhow::Result<()> {
         let max_pings = 10;
+        let mut current_match = self.current_state.current_match.lock().await;
+        let mut players = self.current_state.players.lock().await;
         loop {
             {
                 // check if all players have been pinged the max_pings times
@@ -275,13 +273,13 @@ impl MessageHandler for P2PRollbackServer {
                         packets_loss_percent: 0,
                     });
                     player.pending_pings.insert(sequence_number, Instant::now());
-                    self.send_message(ServerMessageType::RequestPing, msg, &player.socket, current_match)
+                    self.send_message(ServerMessageType::RequestPing, msg, &player.socket, &mut current_match)
                         .await;
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        self.send_players_get_ready(players, current_match).await?;
+        self.send_players_get_ready(&mut players, &mut current_match).await?;
 
         Ok(())
     }
