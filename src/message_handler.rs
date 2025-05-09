@@ -16,7 +16,10 @@ use crate::{
         },
         server_messages::{PlayerConnection, RequestPing, ServerMessagePayload, ServerMessageType},
     },
-    models::{game_match::GameMatch, player::Player},
+    models::{
+        game_match::GameMatch,
+        player::{self, Player},
+    },
     P2PRollbackServer,
 };
 use serde::{Deserialize, Serialize};
@@ -287,28 +290,24 @@ impl MessageHandler for P2PRollbackServer {
         let max_ping = players.iter().map(|p| p.ping).max().unwrap_or(0);
 
         {
-            for player in players.iter_mut() {
-                // Only update host's ping if max_players == 2
-                // TODO: What should the host ping be if max_players > 2?
-                if player.is_host {
-                    if max_players == 2 {
-                        player.ping = max_ping;
-                    }
-                }
-
-                if player.socket == src {
-                    player.last_client_frame = payload.client_frame;
-                }
+            if let Some(player) = players.iter_mut().find(|p| p.socket == src) {
+                player.last_client_frame = payload.client_frame;
 
                 for (i, &input) in payload.input_per_frame.iter().enumerate() {
                     let frame = payload.start_frame + i as u32;
                     player.inputs.insert(frame, input);
                 }
 
-                // TODO: UPDATE PLAYER RIFT
+                // Only update host's ping if max_players == 2
+                // TODO: What should the host ping be if max_players > 2?
+                if player.is_host {
+                    if max_players == 2 {
+                        player.ping = max_ping;
+                    }
+                    current_match.current_frame = player.last_client_frame;
+                    self.send_player_inputs(&mut players, &mut current_match).await?;
+                }
             }
-            // TODO : only send this when player is host
-            self.send_player_inputs(&mut players, &mut current_match).await?;
         }
 
         Ok(())

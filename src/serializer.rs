@@ -6,8 +6,9 @@ use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::message_types::client_messages::{
-    ClientHeader, ClientMessageType, ClientPayload, DisconnectingPayload, GameMatchData, MatchResultPayload, PlayerConnectionPaylod, PlayerData,
-    PlayerDisconnectedAckPayload, PlayerInputAckPayload, PlayerInputPayload, PongPayload, ReadyForMatchPayload, UdpClientMessage, CLIENT_HEADER_SIZE,
+    ClientHeader, ClientMessageType, ClientPayload, DisconnectingPayload, GameMatchData, MatchResultPayload,
+    PlayerConnectionPaylod, PlayerData, PlayerDisconnectedAckPayload, PlayerInputAckPayload, PlayerInputPayload,
+    PongPayload, ReadyForMatchPayload, UdpClientMessage, CLIENT_HEADER_SIZE,
 };
 use crate::message_types::server_messages::{ServerMessagePayload, UdpServerMessage};
 
@@ -27,7 +28,10 @@ pub fn parse_client_message(buf: &[u8]) -> Result<UdpClientMessage> {
     let sequence = cursor.read_u32::<LittleEndian>()?;
 
     let msg_type = ClientMessageType::from(type_byte);
-    let header = ClientHeader { type_: msg_type, sequence };
+    let header = ClientHeader {
+        type_: msg_type,
+        sequence,
+    };
 
     // Read payload based on message type
     let payload = match msg_type {
@@ -143,6 +147,8 @@ pub fn parse_client_message(buf: &[u8]) -> Result<UdpClientMessage> {
             let ready = cursor.read_u8()?;
             ClientPayload::ReadyForMatchPayload(ReadyForMatchPayload { ready })
         }
+
+        ClientMessageType::MVSI_HOLE_PUNCH => ClientPayload::MVSI_HOLE_PUNCH(),
     };
 
     Ok(UdpClientMessage { header, payload })

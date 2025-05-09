@@ -5,6 +5,8 @@ mod message_types;
 mod models;
 mod serializer;
 
+use std::fs;
+use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
@@ -32,8 +34,24 @@ pub fn get_mvsi_port() -> u16 {
     PORT_4314.load(Ordering::SeqCst)
 }
 
-const IP_ADDRESS: &str = "127.0.0.1:41234";
-const MVS_HTTP_ENDPOINT: &str = "https://dokken-api.wbagora.com";
+fn get_bdomain_from_file() -> String {
+    let file = fs::File::open("settings.ini").expect("Failed to open settings.ini");
+    let reader = io::BufReader::new(file);
+
+    for line in reader.lines() {
+        if let Ok(line) = line {
+            if line.starts_with("bDomain=") {
+                return line[8..].trim_matches('"').to_string();
+            }
+        }
+    }
+
+    panic!("bDomain not found in settings.ini");
+}
+
+use once_cell::sync::Lazy;
+
+static MVS_HTTP_ENDPOINT: Lazy<String> = Lazy::new(|| get_bdomain_from_file());
 
 enum ServerState {
     Idle,
@@ -164,14 +182,37 @@ impl P2PRollbackServer {
                 bail!("Failed to parse client message: {}", e);
             }
         };
-        match client_msg.header.type_ {
-            ClientMessageType::PlayerConnection => {
-                if let ClientPayload::PlayerConnectionPaylod(payload) = client_msg.payload {
-                    self.handle_new_connection(payload, src).await?;
-                } else {
-                    warn!("Unexpected payload type for NewConnection message");
+
+        if let ClientMessageType::PlayerConnection = client_msg.header.type_ {
+            if let ClientPayload::PlayerConnectionPaylod(payload) = client_msg.payload {
+                self.handle_new_connection(payload, src).await?;
+                return Ok(());
+            } else {
+                warn!("Unexpected payload type for NewConnection message");
+            }
+        }
+
+        {
+            let mut players = self.current_state.players.lock().await;
+            match players.iter_mut().find(|p| p.socket == src && p.port == src.port()) {
+                Some(player) => {
+                    if client_msg.header.sequence < player.last_seq_received {
+                        warn!("Received old message from player: {:?}", src);
+                        return Ok(());
+                    }
+                }
+                None => {
+                    warn!("Player not found for socket: {:?}", src);
+                    return Ok(());
                 }
             }
+        }
+
+        match client_msg.header.type_ {
+            ClientMessageType::MVSI_HOLE_PUNCH => {
+                // Do nothing for now
+            }
+
             ClientMessageType::Pong => {
                 if let ClientPayload::PongPayload(payload) = client_msg.payload {
                     self.handle_player_pong_response(payload, src).await?;
