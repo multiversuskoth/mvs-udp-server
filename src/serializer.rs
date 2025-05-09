@@ -3,7 +3,7 @@
 use std::io::{Cursor, Read};
 
 use anyhow::{anyhow, Result};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::message_types::client_messages::{
     ClientHeader, ClientMessageType, ClientPayload, DisconnectingPayload, GameMatchData, MatchResultPayload,
@@ -213,8 +213,8 @@ pub fn serialize_server_message(message: &UdpServerMessage, max_players: usize) 
         }
 
         ServerMessagePayload::RequestPing(data) => {
-            buffer.write_i16::<LittleEndian>(data.ping)?;
-            buffer.write_i16::<LittleEndian>(data.packets_loss_percent)?;
+            buffer.write_u16::<BigEndian>(data.ping)?;
+            buffer.write_u16::<BigEndian>(data.packets_loss_percent)?;
         }
 
         ServerMessagePayload::Kick(data) => {

@@ -7,7 +7,7 @@ mod serializer;
 
 use std::fs;
 use std::io::{self, BufRead};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use anyhow::bail;
@@ -27,11 +27,11 @@ use serializer::{parse_client_message, serialize_server_message};
 use tokio::sync::MutexGuard;
 use tokio::{net::UdpSocket, sync::Mutex};
 
-// Global static variable to hold port 4314
-static PORT_4314: AtomicU16 = AtomicU16::new(4314);
+// Global static variable to hold port 41234
+static MVSI_PORT: AtomicU16 = AtomicU16::new(41234);
 
 pub fn get_mvsi_port() -> u16 {
-    PORT_4314.load(Ordering::SeqCst)
+    MVSI_PORT.load(Ordering::SeqCst)
 }
 
 fn get_bdomain_from_file() -> String {
@@ -63,11 +63,13 @@ struct SharedState {
     players: Arc<Mutex<Vec<Player>>>,
     current_match: Arc<Mutex<GameMatch>>,
     current_state: Arc<Mutex<ServerState>>,
+    passthrough: AtomicBool,
+    hostSocket: Option<SocketAddr>,
 }
 
 struct P2PRollbackServer {
     socket: Arc<UdpSocket>,
-    current_state: Arc<SharedState>,
+    current_state: SharedState,
     http_client: reqwest::Client,
     http_endpoint: String,
 }
@@ -77,11 +79,14 @@ impl P2PRollbackServer {
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", get_mvsi_port()))
             .await
             .expect("Failed to bind socket");
-        let current_state = Arc::new(SharedState {
+        info!("UDP Started at {}", socket.local_addr().unwrap());
+        let current_state = SharedState {
             players: Arc::new(Mutex::new(Vec::new())),
             current_match: Arc::new(Mutex::new(GameMatch::new())),
             current_state: Arc::new(Mutex::new(ServerState::Idle)),
-        });
+            passthrough: AtomicBool::new(false),
+            hostSocket: None,
+        };
 
         let http_client = Client::new();
 
@@ -165,7 +170,7 @@ impl P2PRollbackServer {
             .unwrap();
         match self.socket.send_to(compressed.as_slice(), target).await {
             Ok(_) => {
-                info!("Sent message to {:?}", target);
+                info!("Sent {:#?} to {:?}", server_msg.header.type_, target);
             }
             Err(e) => {
                 error!("Failed to send message: {}", e);
@@ -173,7 +178,12 @@ impl P2PRollbackServer {
         }
     }
 
-    async fn handle_incoming_message(&self, buf: &[u8], src: SocketAddr) -> anyhow::Result<()> {
+    async fn handle_incoming_message(&mut self, buf: &[u8], src: SocketAddr) -> anyhow::Result<()> {
+        if let Some(host_socket) = self.current_state.hostSocket {
+            info!("passthrough");
+            self.socket.send_to(buf, host_socket).await?;
+            return Ok(());
+        }
         let decompressed =
             decompress_packet(&buf, None).map_err(|e| anyhow::anyhow!("Failed to decompress packet: {}", e))?;
         let client_msg = match parse_client_message(decompressed.as_slice()) {
@@ -182,6 +192,13 @@ impl P2PRollbackServer {
                 bail!("Failed to parse client message: {}", e);
             }
         };
+
+        info!("Recv {:#?} from {:?} ", client_msg.header.type_, src);
+
+        if let ClientMessageType::MVSI_HOLE_PUNCH = client_msg.header.type_ {
+            // Do nothing for now
+            return Ok(());
+        }
 
         if let ClientMessageType::PlayerConnection = client_msg.header.type_ {
             if let ClientPayload::PlayerConnectionPaylod(payload) = client_msg.payload {
@@ -209,10 +226,6 @@ impl P2PRollbackServer {
         }
 
         match client_msg.header.type_ {
-            ClientMessageType::MVSI_HOLE_PUNCH => {
-                // Do nothing for now
-            }
-
             ClientMessageType::Pong => {
                 if let ClientPayload::PongPayload(payload) = client_msg.payload {
                     self.handle_player_pong_response(payload, src).await?;
@@ -323,18 +336,22 @@ impl P2PRollbackServer {
         Ok(())
     }
 
-    async fn run(&self) {
+    async fn run(&mut self) {
         let mut buf = [0; 1024];
         loop {
             match self.socket.recv_from(&mut buf).await {
-                Ok((_, addr)) => match self.handle_incoming_message(&buf, addr).await {
-                    Ok(_) => {
-                        info!("Handled message from {:?}", addr);
-                    }
-                    Err(e) => {
-                        error!("Error handling message: {}", e);
-                    }
-                },
+                Ok((_, addr)) => {
+                    tokio::spawn(async move {
+                        match self.handle_incoming_message(&buf, addr).await {
+                            Ok(_) => {
+                                //info!("Handled message from {:?}", addr);
+                            }
+                            Err(e) => {
+                                error!("Error handling message: {}", e);
+                            }
+                        }
+                    });
+                }
                 Err(e) => {
                     error!("Error receiving data: {}", e);
                     break;
@@ -346,6 +363,6 @@ impl P2PRollbackServer {
 
 pub async fn start_rollback_server() {
     info!("Starting MVS P2P Rollback Server");
-    let server = P2PRollbackServer::new().await;
+    let mut server = P2PRollbackServer::new().await;
     server.run().await;
 }
