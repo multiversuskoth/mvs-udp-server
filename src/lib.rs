@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use anyhow::bail;
+use chrono::Local;
 use compression::{compress_packet, decompress_packet};
-use message_handler::MessageHandler;
+use message_handler::{MVSIPlayer, MessageHandler};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use message_types::{
     client_messages::{ClientMessageType, ClientPayload},
     server_messages::{
@@ -26,6 +27,14 @@ use reqwest::Client;
 use serializer::{parse_client_message, serialize_server_message};
 use tokio::sync::MutexGuard;
 use tokio::{net::UdpSocket, sync::Mutex};
+
+use std::os::raw::c_uint;
+
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(uPeriod: c_uint) -> c_uint;
+    fn timeEndPeriod(uPeriod: c_uint) -> c_uint;
+}
 
 // Global static variable to hold port 41234
 static MVSI_PORT: AtomicU16 = AtomicU16::new(41234);
@@ -59,13 +68,14 @@ enum ServerState {
     MatchInProgress,
 }
 
-
 struct SharedState {
     players: Arc<Mutex<Vec<Player>>>,
     current_match: Arc<Mutex<GameMatch>>,
     current_state: Arc<Mutex<ServerState>>,
     passthrough: AtomicBool,
-    hostSocket: Arc<Mutex<Option<SocketAddr>>>,
+    host_socket: Arc<Mutex<Option<SocketAddr>>>,
+    local_socket: Arc<Mutex<Option<SocketAddr>>>,
+    players_data: Arc<Mutex<Vec<MVSIPlayer>>>,
 }
 
 #[derive(Clone)]
@@ -73,7 +83,8 @@ struct P2PRollbackServer {
     socket: Arc<UdpSocket>,
     current_state: Arc<SharedState>,
     http_client: reqwest::Client,
-    http_endpoint: String,
+    is_local_player_connected: Arc<AtomicBool>,
+    is_host: Arc<AtomicBool>,
 }
 
 impl P2PRollbackServer {
@@ -81,13 +92,15 @@ impl P2PRollbackServer {
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", get_mvsi_port()))
             .await
             .expect("Failed to bind socket");
-        info!("UDP Started at {}", socket.local_addr().unwrap());
+        debug!("UDP Started at {}", socket.local_addr().unwrap());
         let current_state = Arc::new(SharedState {
             players: Arc::new(Mutex::new(Vec::new())),
             current_match: Arc::new(Mutex::new(GameMatch::new())),
             current_state: Arc::new(Mutex::new(ServerState::Idle)),
             passthrough: AtomicBool::new(false),
-            hostSocket:  Arc::new(Mutex::new(None)),
+            host_socket: Arc::new(Mutex::new(None)),
+            local_socket: Arc::new(Mutex::new(None)),
+            players_data: Arc::new(Mutex::new(vec![])),
         });
 
         let http_client = Client::new();
@@ -96,7 +109,8 @@ impl P2PRollbackServer {
             socket: Arc::new(socket),
             current_state,
             http_client,
-            http_endpoint: MVS_HTTP_ENDPOINT.to_string(),
+            is_local_player_connected: Arc::new(AtomicBool::new(false)),
+            is_host: Arc::new(AtomicBool::new(false)),
         };
         server
     }
@@ -172,7 +186,9 @@ impl P2PRollbackServer {
             .unwrap();
         match self.socket.send_to(compressed.as_slice(), target).await {
             Ok(_) => {
-                info!("Sent {:#?} to {:?}", server_msg.header.type_, target);
+                let now = Local::now();
+                let formatted = now.format("%H:%M:%S:%3f").to_string();
+                debug!("{} Sent {:#?} to {:?}", formatted, server_msg.header.type_, target);
             }
             Err(e) => {
                 error!("Failed to send message: {}", e);
@@ -180,13 +196,25 @@ impl P2PRollbackServer {
         }
     }
 
-    async fn handle_incoming_message(&mut self, buf: &[u8], src: SocketAddr) -> anyhow::Result<()> {
+    async fn handle_incoming_message(&self, len: usize, buf: &[u8], src: SocketAddr) -> anyhow::Result<()> {
+        {
+            let host_socket = self.current_state.host_socket.lock().await;
+            if let Some(host_socket_real) = *host_socket {
+                debug!("Recv from {:?} ", src);
+                if src.ip().to_string() == "127.0.0.1" {
+                    debug!("Send to {:?} ", host_socket_real);
+                    self.socket.send_to(&buf[0..len], host_socket_real).await;
+                } else {
+                    let local_socket = self.current_state.local_socket.lock().await.unwrap();
 
-        if let Some(host_socket) = *self.current_state.hostSocket.lock().await {
-            info!("passthrough");
-            self.socket.send_to(buf, host_socket).await?;
-            return Ok(());
+                    debug!("Send to {:?} ", local_socket);
+                    self.socket.send_to(&buf[0..len], local_socket).await;
+                }
+
+                return Ok(());
+            }
         }
+
         let decompressed =
             decompress_packet(&buf, None).map_err(|e| anyhow::anyhow!("Failed to decompress packet: {}", e))?;
         let client_msg = match parse_client_message(decompressed.as_slice()) {
@@ -195,14 +223,15 @@ impl P2PRollbackServer {
                 bail!("Failed to parse client message: {}", e);
             }
         };
-
-        info!("Recv {:#?} from {:?} ", client_msg.header.type_, src);
+        let now = Local::now();
+        let formatted = now.format("%H:%M:%S:%3f").to_string();
+        debug!("{} Recv {:#?} from {:?} ", formatted, client_msg.header.type_, src);
 
         if let ClientMessageType::MVSI_HOLE_PUNCH = client_msg.header.type_ {
             // Do nothing for now
             return Ok(());
         }
-
+        // Register player
         if let ClientMessageType::PlayerConnection = client_msg.header.type_ {
             if let ClientPayload::PlayerConnectionPaylod(payload) = client_msg.payload {
                 self.handle_new_connection(payload, src).await?;
@@ -214,12 +243,14 @@ impl P2PRollbackServer {
 
         {
             let mut players = self.current_state.players.lock().await;
-            match players.iter_mut().find(|p| p.socket == src && p.port == src.port()) {
+            match players.iter_mut().find(|p| p.socket == src) {
                 Some(player) => {
+     
                     if client_msg.header.sequence < player.last_seq_received {
                         warn!("Received old message from player: {:?}", src);
                         return Ok(());
                     }
+                    player.last_seq_received = client_msg.header.sequence;
                 }
                 None => {
                     warn!("Player not found for socket: {:?}", src);
@@ -273,11 +304,8 @@ impl P2PRollbackServer {
         players: &mut MutexGuard<'_, Vec<Player>>,
         current_match: &mut MutexGuard<'_, GameMatch>,
     ) -> anyhow::Result<()> {
-        let peer_input_data: Vec<_> = players
-            .iter()
-            .enumerate()
-            .map(|(peer_idx, peer)| (peer_idx, peer.inputs.clone()))
-            .collect();
+
+        let peer_input_data: Vec<_> = players.iter().map(|peer| (peer.index, peer.inputs.clone())).collect();
 
         for recipient in players.iter_mut() {
             let mut start_frame = Vec::with_capacity(current_match.num_players as usize);
@@ -289,12 +317,12 @@ impl P2PRollbackServer {
             // Initialize empty arrays for each player
             for _ in 0..current_match.num_players {
                 input_per_frame.push(Vec::new());
-                num_frames.push(0);
             }
 
             // For each peer, decide what frames to send
             for (peer_idx, hist_map) in &peer_input_data {
-                let last_ack = recipient.acked_frames[*peer_idx];
+                let last_ack = recipient.acked_frames[*peer_idx as usize];
+
                 let next_frame = last_ack + 1;
 
                 // If we have the next real input
@@ -305,7 +333,7 @@ impl P2PRollbackServer {
                     let mut f = next_frame;
                     let mut frames_for_player = 0;
                     while hist_map.contains_key(&f) {
-                        input_per_frame[*peer_idx].push(*hist_map.get(&f).unwrap());
+                        input_per_frame[*peer_idx as usize].push(*hist_map.get(&f).unwrap());
                         frames_for_player += 1;
                         f += 1;
                     }
@@ -327,6 +355,12 @@ impl P2PRollbackServer {
                 input_per_frame,
             });
 
+            //debug!("PlayerInputs {:#?}", msg);
+            debug!(
+                "PlayerPing-rift PING:{} RIFT:{} {}",
+                recipient.ping, recipient.rift, recipient.socket,
+            );
+
             //recipient.last_sent_time = Some(Instant::now());
             recipient
                 .pending_pings
@@ -339,31 +373,35 @@ impl P2PRollbackServer {
         Ok(())
     }
 
-    async fn run(&mut self) {
-        let mut buf = [0; 1024];
-        loop {
-            match self.socket.recv_from(&mut buf).await {
-                Ok((_, addr)) => {
-                    match self.handle_incoming_message(&buf, addr).await {
-                        Ok(_) => {
-                            //info!("Handled message from {:?}", addr);
-                        }
-                        Err(e) => {
-                            error!("Error handling message: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Error receiving data: {}", e);
-                    break;
-                }
-            }
-        }
+    pub fn calc_rift_variable_tick(&self, server_frame: u32, client_frame: u32, ping: u16) -> f32 {
+        let target_frame_time = 16.6667;
+
+        let ping_in_frames = ping as f32 / target_frame_time;
+
+        let rift = (client_frame as f32 + ping_in_frames / 2.0) - server_frame as f32;
+        println!("RIFT IS {}", rift);
+        // Clamp rift to [-49.0, 49.0]
+        rift.clamp(-49.0, 49.0)
     }
 }
 
-pub async fn start_rollback_server() {
+pub async fn start_rollback_server() -> anyhow::Result<()> {
     info!("Starting MVS P2P Rollback Server");
-    let mut server = P2PRollbackServer::new().await;
-    server.run().await;
+    unsafe {
+        let result = timeBeginPeriod(1);
+        if result != 0 {
+            eprintln!("timeBeginPeriod failed: {}", result);
+        }
+    }
+
+    let handler = P2PRollbackServer::new().await;
+    loop {
+        let mut buf = [0; 1024];
+        let (len, addr) = handler.socket.recv_from(&mut buf).await?;
+        let handler_clone = handler.clone();
+        let now = Local::now();
+        let formatted = now.format("%H:%M:%S:%3f").to_string();
+        //println!("{} RECEIVED {} ", formatted, addr);
+        tokio::spawn(async move { handler_clone.handle_incoming_message(len, &buf, addr).await });
+    }
 }
