@@ -75,7 +75,7 @@ struct SharedState {
     passthrough: AtomicBool,
     host_socket: Arc<Mutex<Option<SocketAddr>>>,
     local_socket: Arc<Mutex<Option<SocketAddr>>>,
-    players_data: Arc<Mutex<Vec<MVSIPlayer>>>,
+    http_players: Arc<Mutex<Vec<MVSIPlayer>>>,
 }
 
 #[derive(Clone)]
@@ -100,7 +100,7 @@ impl P2PRollbackServer {
             passthrough: AtomicBool::new(false),
             host_socket: Arc::new(Mutex::new(None)),
             local_socket: Arc::new(Mutex::new(None)),
-            players_data: Arc::new(Mutex::new(vec![])),
+            http_players: Arc::new(Mutex::new(vec![])),
         });
 
         let http_client = Client::new();

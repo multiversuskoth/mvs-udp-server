@@ -8,7 +8,10 @@ use std::{
 use anyhow::bail;
 use log::{debug, error, info, warn};
 use serde_json::json;
-use tokio::{sync::MutexGuard, time::{interval, sleep}};
+use tokio::{
+    sync::MutexGuard,
+    time::{interval, sleep},
+};
 
 use crate::{
     get_mvsi_port,
@@ -81,7 +84,7 @@ impl MessageHandler for P2PRollbackServer {
                 Ok(resp) => match resp.json::<MVSIMatchConfig>().await {
                     Ok(match_data) => {
                         debug!("MATCH_DATA:{:#?}", match_data);
-                        let mut players_data = self.current_state.players_data.lock().await;
+                        let mut players_data = self.current_state.http_players.lock().await;
                         *players_data = match_data.players;
                         current_match.num_players = match_data.max_players;
                         current_match.match_id = payload.match_data.match_id.clone();
@@ -155,46 +158,58 @@ impl MessageHandler for P2PRollbackServer {
         src_socket: SocketAddr,
     ) -> anyhow::Result<()> {
         {
+            let current_player_index = payload.player_data.player_index as u16;
             let mut current_match = self.current_state.current_match.lock().await;
 
             let is_local_player_connected = self.is_local_player_connected.load(Ordering::SeqCst);
             if !is_local_player_connected {
+                // Save the local socket
+                // This is the socket that we will use to send messages to the local player
+                {
+                    let mut local_socket = self.current_state.local_socket.lock().await;
+                    *local_socket = Some(src_socket);
+                }
                 // Register match if its not already
-
                 self.try_register_match(&payload, &mut current_match).await;
                 self.is_local_player_connected.store(true, Ordering::SeqCst);
-                let players_data = self.current_state.players_data.lock().await;
-                if let Some(mvsi_player) = players_data
+                let http_players_data = self.current_state.http_players.lock().await.clone();
+
+                if let Some(http_player) = http_players_data
                     .iter()
                     .find(|p| p.player_index == payload.player_data.player_index)
                 {
-                    if mvsi_player.is_host {
-                        debug!("PLAYER IS HOST");
+                    if http_player.is_host {
+                        info!("PLAYER IS HOST");
                         self.is_host.store(true, Ordering::SeqCst);
 
-                        for player_data in players_data.iter() {
+                        // UDP Hole punch all other players if host
+                        for player_data in http_players_data.iter() {
                             if player_data.player_index != payload.player_data.player_index {
                                 let mut count = 0;
                                 let target = SocketAddr::new(player_data.ip.parse().unwrap(), get_mvsi_port());
-                                loop {
-                                    if count > 3 {
-                                        break;
+                                let s_clone = self.clone();
+                                // Spawn a new task to send UDP hole punch packets to everyone else
+                                tokio::spawn(async move {
+                                    loop {
+                                        let mut current_match = s_clone.current_state.current_match.lock().await;
+                                        if count > 3 {
+                                            break;
+                                        }
+                                        s_clone.send_udp_hole_punch(&target, &mut current_match).await;
+                                        count += 1;
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                                     }
-                                    self.send_udp_hole_punch(&target, &mut current_match).await;
-                                    count += 1;
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                                }
+                                });
                             }
                         }
                     } else {
-                        for player_data in players_data.iter() {
+                        // If we are not the host then we need to find the host
+                        // and set the host socket
+                        for player_data in http_players_data.iter() {
                             if player_data.is_host {
                                 let host_target = SocketAddr::new(player_data.ip.parse().unwrap(), get_mvsi_port());
                                 let mut host_socket = self.current_state.host_socket.lock().await;
                                 *host_socket = Some(host_target);
-
-                                let mut local_socket = self.current_state.local_socket.lock().await;
-                                *local_socket = Some(src_socket);
                             }
                         }
                         return Ok(());
@@ -203,41 +218,34 @@ impl MessageHandler for P2PRollbackServer {
             }
 
             let mut players = self.current_state.players.lock().await;
-            // Check if player is already register otherwise exit out of here
-            if players
-                .iter()
-                .any(|p| p.index == payload.player_data.player_index as u16)
+            if players.iter().any(|p| p.index == current_player_index) {
+                debug!("Player already exists: index={}, {}", current_player_index, src_socket);
+                return Ok(());
+            }
+
             {
-                debug!(
-                    "Player already exists: index={}, {}",
-                    payload.player_data.player_index, src_socket
-                );
-                return Ok(());
+                // If host socket is set then we don't need to do anything
+                // and just return. We will now just forward the packets to the host socket
+                let host_socket = self.current_state.host_socket.lock().await;
+                if let Some(_) = *host_socket {
+                    return Ok(());
+                }
             }
 
-            let host_socket = self.current_state.host_socket.lock().await;
-            if let Some(host_socket_real) = *host_socket {
-                return Ok(());
-            }
+            let http_data = self.current_state.http_players.lock().await;
 
-            let players_data = self.current_state.players_data.lock().await;
-            let a_socket = if src_socket.ip().to_string() == "127.0.0.1" {
-                "IP"
-            } else {
-                &src_socket.ip().to_string()
-            };
-            if let Some(player_data) = players_data.iter().find(|p| p.ip == a_socket) {                
+            if let Some(http_player) = http_data.iter().find(|p| p.player_index == current_player_index) {
                 let msg = ServerMessagePayload::PlayerConnection(PlayerConnection {
                     success: 0,
                     num_players: current_match.num_players as u8,
-                    player_index: payload.player_data.player_index as u8,
+                    player_index: current_player_index as u8,
                     match_duration: current_match.match_duration,
                     unused_0: 0,
                     unused_1: 0,
                 });
 
                 let player = Player {
-                    index: payload.player_data.player_index as u16,
+                    index: current_player_index,
                     team_index: payload.player_data.team_id,
                     socket: src_socket,
                     pending_pings: HashMap::new(),
@@ -250,11 +258,12 @@ impl MessageHandler for P2PRollbackServer {
                     acked_frames: vec![0; current_match.num_players as usize],
                     inputs: HashMap::new(),
                     missed_inputs: 0,
-                    is_host: player_data.is_host,
+                    is_host: http_player.is_host,
                     last_seq_received: 0,
                 };
 
                 players.push(player);
+                drop(http_data);
 
                 self.send_message(
                     ServerMessageType::PlayerConnection,
@@ -264,10 +273,7 @@ impl MessageHandler for P2PRollbackServer {
                 )
                 .await;
 
-                debug!(
-                    "Player {} connected with {}",
-                    payload.player_data.player_index, src_socket
-                );
+                debug!("Player {} connected with {}", current_player_index, src_socket);
             }
 
             if current_match.ready {
@@ -327,7 +333,7 @@ impl MessageHandler for P2PRollbackServer {
                         ping: player.ping as u16,
                         packets_loss_percent: 0,
                     });
-                    let sequence_number = current_match.sequence_number.clone();
+                    let sequence_number = current_match.sequence_number;
                     player.pending_pings.insert(sequence_number, Instant::now());
                     self.send_message(ServerMessageType::RequestPing, msg, &player.socket, &mut current_match)
                         .await;
@@ -361,14 +367,12 @@ impl MessageHandler for P2PRollbackServer {
 
             let handler_copy = self.clone();
             tokio::spawn(async move {
-
                 let target_interval = Duration::from_millis(16);
                 let mut ticker = interval(target_interval);
 
                 let mut last_tick = Instant::now();
 
                 loop {
-
                     ticker.tick().await;
                     let mut current_match = handler_copy.current_state.current_match.lock().await;
                     let mut players = handler_copy.current_state.players.lock().await;
@@ -422,11 +426,10 @@ impl MessageHandler for P2PRollbackServer {
                 // TODO: What should the host ping be if max_players > 2?
                 if player.is_host {
                     if max_players == 2 {
-                        println!("HOST PING:{}",max_ping);
+                        println!("HOST PING:{}", max_ping);
                         player.ping = max_ping;
                     }
                     current_match.current_frame = player.last_client_frame;
-          
                 } else {
                     player.rift = self.calc_rift_variable_tick(
                         current_match.current_frame,
