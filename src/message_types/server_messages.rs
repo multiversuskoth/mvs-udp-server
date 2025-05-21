@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ServerMessageType {
@@ -67,8 +69,8 @@ pub struct PlayerInputs {
 
 #[derive(Debug, Clone)]
 pub struct RequestPing {
-    pub ping: i16,
-    pub packets_loss_percent: i16,
+    pub ping: u16,
+    pub packets_loss_percent: u16,
 }
 
 #[derive(Debug, Clone)]

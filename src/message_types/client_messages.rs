@@ -9,6 +9,7 @@ pub enum ClientMessageType {
     Disconnecting = 6,
     PlayerDisconnectedAck = 7,
     ReadyForMatch = 8,
+    MVSI_HOLE_PUNCH = 13,
 }
 
 impl From<u8> for ClientMessageType {
@@ -22,6 +23,7 @@ impl From<u8> for ClientMessageType {
             6 => ClientMessageType::Disconnecting,
             7 => ClientMessageType::PlayerDisconnectedAck,
             8 => ClientMessageType::ReadyForMatch,
+            13 => ClientMessageType::MVSI_HOLE_PUNCH,
             _ => panic!("Unknown client message type: {}", value),
         }
     }
@@ -107,6 +109,7 @@ pub enum ClientPayload {
     DisconnectingPayload(DisconnectingPayload),
     PlayerDisconnectedAckPayload(PlayerDisconnectedAckPayload),
     ReadyForMatchPayload(ReadyForMatchPayload),
+    MVSI_HOLE_PUNCH()
 }
 
 #[derive(Debug, Clone)]

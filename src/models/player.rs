@@ -10,8 +10,6 @@ pub struct Player {
     pub ready: bool,
     pub connected: bool,
     pub ping: u16,
-    pub ip: String,    // Added IP address
-    pub port: u16,     // Added port
     pub is_host: bool, // Added isHost flag
     pub last_seq_received: u32,
 

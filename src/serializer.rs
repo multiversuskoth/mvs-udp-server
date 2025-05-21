@@ -3,11 +3,12 @@
 use std::io::{Cursor, Read};
 
 use anyhow::{anyhow, Result};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::message_types::client_messages::{
-    ClientHeader, ClientMessageType, ClientPayload, DisconnectingPayload, GameMatchData, MatchResultPayload, PlayerConnectionPaylod, PlayerData,
-    PlayerDisconnectedAckPayload, PlayerInputAckPayload, PlayerInputPayload, PongPayload, ReadyForMatchPayload, UdpClientMessage, CLIENT_HEADER_SIZE,
+    ClientHeader, ClientMessageType, ClientPayload, DisconnectingPayload, GameMatchData, MatchResultPayload,
+    PlayerConnectionPaylod, PlayerData, PlayerDisconnectedAckPayload, PlayerInputAckPayload, PlayerInputPayload,
+    PongPayload, ReadyForMatchPayload, UdpClientMessage, CLIENT_HEADER_SIZE,
 };
 use crate::message_types::server_messages::{ServerMessagePayload, UdpServerMessage};
 
@@ -27,7 +28,10 @@ pub fn parse_client_message(buf: &[u8]) -> Result<UdpClientMessage> {
     let sequence = cursor.read_u32::<LittleEndian>()?;
 
     let msg_type = ClientMessageType::from(type_byte);
-    let header = ClientHeader { type_: msg_type, sequence };
+    let header = ClientHeader {
+        type_: msg_type,
+        sequence,
+    };
 
     // Read payload based on message type
     let payload = match msg_type {
@@ -143,6 +147,8 @@ pub fn parse_client_message(buf: &[u8]) -> Result<UdpClientMessage> {
             let ready = cursor.read_u8()?;
             ClientPayload::ReadyForMatchPayload(ReadyForMatchPayload { ready })
         }
+
+        ClientMessageType::MVSI_HOLE_PUNCH => ClientPayload::MVSI_HOLE_PUNCH(),
     };
 
     Ok(UdpClientMessage { header, payload })
@@ -207,8 +213,8 @@ pub fn serialize_server_message(message: &UdpServerMessage, max_players: usize) 
         }
 
         ServerMessagePayload::RequestPing(data) => {
-            buffer.write_i16::<LittleEndian>(data.ping)?;
-            buffer.write_i16::<LittleEndian>(data.packets_loss_percent)?;
+            buffer.write_u16::<BigEndian>(data.ping)?;
+            buffer.write_u16::<BigEndian>(data.packets_loss_percent)?;
         }
 
         ServerMessagePayload::Kick(data) => {
