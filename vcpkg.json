@@ -1,0 +1,9 @@
+{
+  "name": "rollback-server",
+  "version": "1.0.0",
+  "dependencies": [
+    "asio",
+    "curl",
+    "zlib"
+  ]
+}
