@@ -39,12 +39,12 @@ RUN cmake -B build \
 
 RUN strip /src/build/rollback-server
 
-# ---- Final stage (artifact only) ----
-FROM scratch AS artifact
-# If you need a minimal runtime image, change FROM to e.g. FROM arm64v8/ubuntu:24.04
+FROM arm64v8/ubuntu:24.04 AS artifact
+
+RUN apt-get update && apt-get install -y bash
 
 # Copy only the built binary
 COPY --from=builder /src/build/rollback-server /rollback-server
 
-# If you want to run it as a container:
+# Default to running the binary, but allow shell override
 ENTRYPOINT ["/rollback-server"]
