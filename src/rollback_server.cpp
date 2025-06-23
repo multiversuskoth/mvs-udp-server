@@ -65,7 +65,6 @@ namespace rollback
 			return;
 		running_ = true;
 
-		// Only spawn UDP server; matches will spawn their own tick loops
 		asio::co_spawn(io_context_, runUdpServer(), asio::detached);
 
 		// Launch two threads to run the io_context_
@@ -537,6 +536,7 @@ namespace rollback
 			player->pendingPings.insert_or_assign(sequence, ts);
 		}
 
+
 		co_return;
 	}
 
@@ -568,6 +568,60 @@ namespace rollback
 			co_await sendServerMessage(match, player, ServerMessageType::PlayersConfigurationData, payload);
 		}
 
+		// Periodically check if all players are ready, if not, resend PlayersConfigurationData
+		asio::co_spawn(io_context_, [this, match]() -> asio::awaitable<void> {
+			static auto startTime = std::chrono::steady_clock::now();
+			while (running_ && match->tickRunning == false) {
+				auto playersSnapshot = match->players.snapshot();
+				bool allReady = true;
+				for (const auto& p : playersSnapshot) {
+					auto player = p.second;					
+					if (std::chrono::steady_clock::now() - startTime > std::chrono::seconds(20)) {
+						// Clean up match and players if not all ready after 20s
+						std::vector<std::string> playerKeys;
+						for (const auto& p : playersSnapshot) {
+							playerKeys.push_back(p.first);
+						}
+						for (const auto& key : playerKeys) {
+							players_.erase(key);
+						}
+						match->players.clear();
+						for (auto& inputMap : match->inputs) {
+							inputMap.clear();
+						}
+						matches_.erase(match->matchId);
+						std::cout << "Match " << match->matchId << " cleaned up (not all players ready after 20s)" << std::endl;
+						break;
+					}
+					std::shared_lock lock(player->mutex);
+					if (!player->ready && !player->disconnected) {
+						allReady = false;
+						break;
+					}
+				}
+				if (allReady) break;
+
+				// Resend PlayersConfigurationData to all not-ready and connected players
+				for (const auto& p : playersSnapshot) {
+					auto player = p.second;
+					std::shared_lock lock(player->mutex);
+					if (!player->ready && !player->disconnected) {
+						PlayersConfigurationDataPayload payload;
+						payload.numPlayers = static_cast<uint8_t>(playersSnapshot.size());
+						payload.configValues.resize(match->max_players_);
+						for (int i = 0; i < match->max_players_; i++) {
+							const std::array<uint16_t, 4> PlayerConfigValues = { 0, 257, 512, 769 };
+							payload.configValues[i] = PlayerConfigValues[i % PlayerConfigValues.size()];
+						}
+						co_await sendServerMessage(match, player, ServerMessageType::PlayersConfigurationData, payload);
+					}
+				}
+				asio::steady_timer timer(io_context_);
+				timer.expires_after(std::chrono::seconds(1));
+				co_await timer.async_wait(asio::use_awaitable);
+			}
+			co_return;
+		}, asio::detached);
 		co_return;
 	}
 
