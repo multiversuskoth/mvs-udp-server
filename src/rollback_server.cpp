@@ -141,6 +141,37 @@ namespace rollback
 
 		try
 		{
+
+			// Check if we're in proxy mode and handle forwarding
+			if (is_proxy_mode_.load())
+			{
+				// Check if message is from localhost (127.0.0.1) - forward to host
+				if (remote.address().is_loopback())
+				{
+					// Store the local client endpoint for future responses
+					local_client_endpoint_ = remote;
+
+					// Forward to host
+					co_await forwardToHost(buffer, bytesReceived);
+					co_return;
+				}
+				// Check if message is from host - forward to local client
+				else if (host_endpoint_.has_value() &&
+					remote.address() == host_endpoint_->address() &&
+					remote.port() == host_endpoint_->port())
+				{
+					co_await forwardToLocal(buffer, bytesReceived);
+					co_return;
+				}
+				// Unknown sender in proxy mode - ignore
+				else
+				{
+					std::cout << "Proxy mode: Ignoring message from unknown sender: "
+						<< remote.address().to_string() << ":" << remote.port() << std::endl;
+					co_return;
+				}
+			}
+
 			// Decompress and parse message
 			auto decompressed = decompressPacket(std::span<const uint8_t>(buffer.data(), bytesReceived));
 			auto clientMsg = parseClientMessage(decompressed);
@@ -220,8 +251,14 @@ namespace rollback
 				auto pendingPingOpt = player->pendingPings.find(payload.serverMessageSequenceNumber);
 				if (pendingPingOpt.has_value())
 				{
-					player->ping = static_cast<int16_t>(
+					int16_t newPing = static_cast<int16_t>(
 						duration_cast<milliseconds>(steady_clock::now() - pendingPingOpt.value()).count());
+					player->smoothedPing =
+						PlayerInfo::clampFloat(PING_ALPHA * static_cast<float>(newPing) + (1.0f - PING_ALPHA) * player->smoothedPing, 255.0f);
+					if (fabs(newPing) < fabs(player->smoothedPing))
+					{
+						player->smoothedPing = newPing;
+					}
 					player->pendingPings.erase(payload.serverMessageSequenceNumber);
 				}
 			}
@@ -290,32 +327,94 @@ namespace rollback
 			}
 		}
 
-		if (!match)
+		if (!host_found_)
 		{
-			// --- New logic: Fetch match config from HTTP server ---
-			std::cout << "New Match : " << matchData.matchId << std::endl;
-			auto configOpt = fetchMatchConfigFromServer(matchData.matchId, matchData.key);
-			if (!configOpt.has_value()) {
+			http_data_ = fetchMatchConfigFromServer(matchData.matchId, matchData.key);
+
+			if (!http_data_.has_value()) {
 				std::cerr << "Failed to fetch match config from server" << std::endl;
 				return nullptr;
 			}
-			const auto& config = configOpt.value();
-			// Create new match using config
-			match = std::make_shared<MatchState>();
-			match->matchId = matchData.matchId;
-			match->key = matchData.key;
-			match->durationInFrames = config.match_duration;
-			match->tickIntervalMs = 1000.0f / 60.0f;
-			match->currentFrame = 0;
-			match->inputs.resize(config.max_players);
-			match->pingPhaseCount = 0;
-			match->pingPhaseTotal = 20;
-			match->sequenceCounter = -1;
-			match->tickRunning = false;
-			match->max_players_ = config.max_players;
-			matches_.insert_or_assign(matchData.matchId, match, true);
+
+			const auto& config = http_data_.value();
+
+
+			if (!match)
+			{
+				// --- New logic: Fetch match config from HTTP server ---
+				std::cout << "New Match : " << matchData.matchId << std::endl;
+				http_data_ = fetchMatchConfigFromServer(matchData.matchId, matchData.key);
+			
+				// Create new match using config
+				match = std::make_shared<MatchState>();
+				match->matchId = matchData.matchId;
+				match->key = matchData.key;
+				match->durationInFrames = config.match_duration;
+				match->tickIntervalMs = 1000.0f / 60.0f;
+				match->currentFrame = 0;
+				match->inputs.resize(config.max_players);
+				match->pingPhaseCount = 0;
+				match->pingPhaseTotal = 20;
+				match->sequenceCounter = -1;
+				match->tickRunning = false;
+				match->max_players_ = config.max_players;
+				matches_.insert_or_assign(matchData.matchId, match, true);
+			}
+			match_lock.unlock();
+
+			// Check if this player is the host
+			bool isHost = false;
+			std::string hostIp;
+			std::cout << "Player Index " << payload.playerData.playerIndex << " Joined " << remote.address() << std::endl;
+			for (const auto& mvsiPlayer : config.players)
+			{
+				if (mvsiPlayer.player_index == payload.playerData.playerIndex)
+				{
+					isHost = mvsiPlayer.is_host;
+				}
+				if (mvsiPlayer.is_host)
+				{
+					hostIp = mvsiPlayer.ip;
+				}
+			}
+
+			if (isHost)
+			{
+				host_found_ = true;
+				std::cout << "Host player found, initiating UDP hole punching..." << std::endl;
+
+				// Start UDP hole punching to all non-host players
+				asio::co_spawn(io_context_,
+					initiateUdpHolePunching(config),
+					asio::detached);
+			}
+			else
+			{
+				// Non-host player - enter proxy mode
+				std::cout << "Non-host player, entering proxy mode. Host IP: " << hostIp << std::endl;
+				is_proxy_mode_ = true;
+
+				// Set up host endpoint for forwarding
+				try
+				{
+					asio::ip::address hostAddr = asio::ip::make_address(hostIp);
+					host_endpoint_ = udp::endpoint(hostAddr, 41234); // Use same port as hole punching
+					std::cout << "Proxy mode enabled. Will forward messages to host at "
+						<< hostIp << ":41234" << std::endl;
+				}
+				catch (const std::exception& e)
+				{
+					std::cerr << "Failed to parse host IP address: " << e.what() << std::endl;
+					return nullptr;
+				}
+
+				// In proxy mode, we don't create a match or player info locally
+				// Just act as a forwarder
+				return nullptr;
+			}
 		}
-		match_lock.unlock();
+
+
 
 		auto existingPlayer = players_.find(key);
 		if (existingPlayer.has_value())
@@ -332,12 +431,11 @@ namespace rollback
 		newPlayer->lastSeqRecv = 0;
 		newPlayer->lastSeqSent = 0;
 		newPlayer->ackedFrames.resize(match->max_players_, 0);
-		newPlayer->ping = 0;
+		newPlayer->smoothedPing = 5.0f;
 		newPlayer->ready = debug;
 		newPlayer->lastClientFrame = 0;
 		newPlayer->lastInputTime = std::chrono::steady_clock::now();
 		newPlayer->rift = 0;
-		newPlayer->emulated = debug;
 
 		// Add player to match and global list
 		{
@@ -429,7 +527,7 @@ namespace rollback
 			RequestQualityDataPayload payload;
 			{
 				std::shared_lock lock(player->mutex);
-				payload.ping = player->ping;
+				payload.ping = static_cast<int16_t>(player->smoothedPing);
 			}
 
 			// std::cout << "Sending Ping for " << player->playerIndex << ":" << player->address << std::endl;
@@ -497,29 +595,19 @@ namespace rollback
 			int16_t newPing = static_cast<int16_t>(
 				duration_cast<milliseconds>(steady_clock::now() - pendingPingOpt.value()).count());
 
-			if (newPing > 255)
-			{
-				newPing = 255; // Cap ping to 255ms;
-			}
 
 			if (newPing > -1)
 			{
-				// === EWMA smoothing ===
-				if (!player->pingInitialized)
-				{
-					// First measurement: initialize smoothedPing exactly to the first sample
-					player->smoothedPing = static_cast<float>(newPing);
-					player->pingInitialized = true;
-				}
-				else
-				{
-					// EWMA update:
-					player->smoothedPing =
-						PlayerInfo::clampFloat(PING_ALPHA * static_cast<float>(newPing) + (1.0f - PING_ALPHA) * player->smoothedPing, 255.0f);
-				}
-				// Store raw ping for backwards‐compat/logging if needed
-				player->ping = newPing;
+				player->rawPing = newPing;
 
+				// === EWMA smoothing ===
+				player->smoothedPing =
+					PlayerInfo::clampFloat(PING_ALPHA * static_cast<float>(newPing) + (1.0f - PING_ALPHA) * player->smoothedPing, 255.0f);
+
+				if (fabs(newPing) < fabs(player->smoothedPing))
+				{
+					player->smoothedPing = newPing;
+				}
 				// Flag that we have a truly new ping‐sample
 				player->hasNewPing = true;
 			}
@@ -612,7 +700,7 @@ namespace rollback
 		if (player->hasNewPing && player->hasNewFrame)
 		{
 			// Convert half of smoothedPing from ms → frames
-			float halfPingFrames = (player->smoothedPing * 0.5f) / TARGET_FRAME_TIME;
+			float halfPingFrames = (player->rawPing * 0.5f) / TARGET_FRAME_TIME;
 
 			// Predict where the client “must be” in terms of frames
 			float predictedClientFrame = static_cast<float>(player->lastClientFrame) + halfPingFrames;
@@ -654,15 +742,12 @@ namespace rollback
 
 			player->smoothRift = PlayerInfo::clampFloat(player->smoothRift, 20.0f);
 
-			// Update the ping to the smoothed value
-			player->ping = player->smoothedPing;
-
 			// Reset the “new” flags after using them
 			player->hasNewPing = false;
 			player->hasNewFrame = false;
 			if (player->smoothRift > 1 || player->smoothRift < -1 || player->smoothedPing > 254)
 			{
-				std::cout << "PIndex:" << player->playerIndex << " PING:" << player->ping << " RIFT:" << player->smoothRift << " RAWRIFT:" << player->rift << " clientFrame:" << predictedClientFrame << " serverFrame:" << serverFrame << std::endl;
+				std::cout << "PIndex:" << player->playerIndex << " PING:" << player->smoothedPing << " RIFT:" << player->smoothRift << " RAWRIFT:" << player->rift << " clientFrame:" << predictedClientFrame << " serverFrame:" << serverFrame << std::endl;
 			}
 		}
 	}
@@ -737,7 +822,7 @@ namespace rollback
 				// Remove match from matches_ map
 				matches_.erase(match->matchId);
 				std::cout << "Match " << match->matchId << " cleaned up (all players disconnected)" << std::endl;
-		
+
 				break; // Exit tick loop
 			}
 			// --- CLEANUP LOGIC END ---
@@ -904,7 +989,7 @@ namespace rollback
 				std::shared_lock lock(recipient->mutex);
 				ackedFrames = recipient->ackedFrames;
 				lastClientFrame = recipient->lastClientFrame;
-				ping = recipient->ping;
+				ping = static_cast<int16_t>(recipient->smoothedPing);
 				smoothRift = recipient->smoothRift;
 			}
 
@@ -1185,6 +1270,110 @@ namespace rollback
 			return;
 		}
 		return;
+	}
+
+	asio::awaitable<void> RollbackServer::forwardToHost(
+		const std::vector<uint8_t>& buffer, size_t bytesReceived)
+	{
+		if (!host_endpoint_.has_value())
+		{
+			std::cerr << "Cannot forward to host: host endpoint not set" << std::endl;
+			co_return;
+		}
+
+		try
+		{
+			// Forward the message directly to the host
+			co_await socket_.async_send_to(
+				asio::buffer(buffer.data(), bytesReceived),
+				*host_endpoint_,
+				asio::use_awaitable);
+
+		}
+		catch (const std::exception& e)
+		{
+			std::cerr << "Error forwarding to host: " << e.what() << std::endl;
+		}
+
+		co_return;
+	}
+
+	asio::awaitable<void> RollbackServer::initiateUdpHolePunching(
+		MVSIMatchConfig matchConfig)
+	{
+		const int PUNCH_ATTEMPTS = 3;
+		const int PUNCH_INTERVAL_MS = 100;
+		const uint16_t TARGET_PORT = 41234;
+
+		for (int attempt = 0; attempt < PUNCH_ATTEMPTS; ++attempt)
+		{
+			for (const auto& player : matchConfig.players)
+			{
+				if (!player.is_host) // Don't send to ourselves (we are the host)
+				{
+					try
+					{
+						// Create UDP hole punch message
+						std::vector<uint8_t> punchMessage = { 'P', 'U', 'N', 'C', 'H' };
+
+						// Create endpoint for the target player
+						asio::ip::address targetAddr = asio::ip::make_address(player.ip);
+						udp::endpoint targetEndpoint(targetAddr, TARGET_PORT);
+
+						// Send hole punch message
+						co_await socket_.async_send_to(
+							asio::buffer(punchMessage),
+							targetEndpoint,
+							asio::use_awaitable);
+
+						std::cout << "Sent UDP hole punch " << (attempt + 1)
+							<< " to player " << player.player_index
+							<< " at " << player.ip << ":" << TARGET_PORT << std::endl;
+					}
+					catch (const std::exception& e)
+					{
+						std::cerr << "Error sending UDP hole punch to " << player.ip
+							<< ": " << e.what() << std::endl;
+					}
+				}
+			}
+
+			if (attempt < PUNCH_ATTEMPTS - 1)
+			{
+				// Wait before next attempt
+				asio::steady_timer timer(co_await asio::this_coro::executor);
+				timer.expires_after(std::chrono::milliseconds(PUNCH_INTERVAL_MS));
+				co_await timer.async_wait(asio::use_awaitable);
+			}
+		}
+
+		std::cout << "UDP hole punching completed" << std::endl;
+		co_return;
+	}
+
+	asio::awaitable<void> RollbackServer::forwardToLocal(
+		const std::vector<uint8_t>& buffer, size_t bytesReceived)
+	{
+		if (!local_client_endpoint_.has_value())
+		{
+			std::cerr << "Cannot forward to local client: endpoint not set" << std::endl;
+			co_return;
+		}
+
+		try
+		{
+			// Forward the message back to the local client
+			co_await socket_.async_send_to(
+				asio::buffer(buffer.data(), bytesReceived),
+				*local_client_endpoint_,
+				asio::use_awaitable);
+		}
+		catch (const std::exception& e)
+		{
+			std::cerr << "Error forwarding to local client: " << e.what() << std::endl;
+		}
+
+		co_return;
 	}
 
 } // namespace rollback

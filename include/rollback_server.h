@@ -59,11 +59,11 @@ namespace rollback
         // === NEW FIELDS for ping‐smoothing and deferred rift calculation ===
         float smoothedPing = 0.0f;   // EWMA‐smoothed ping (ms)
         float smoothRift = 0.0f;
-        bool  pingInitialized = false;  // Did we ever set smoothedPing at least once?
+        uint16_t rawPing = 0;
         bool  hasNewPing = false;  // Set to true whenever handlePlayerInputAck does an EWMA update.
         bool riftInit = false;
 
-        int16_t ping = 0;
+        int16_t count = 0;
 
         uint32_t lastClientFrame = 0;
         bool     hasNewFrame = false; // Set to true whenever handleClientInput() updates lastClientFrame
@@ -72,7 +72,6 @@ namespace rollback
         ThreadSafeMap<uint32_t, uint32_t>  missedInputs;
         // std::map<uint32_t, time_point<steady_clock>> pendingPings;
         ThreadSafeMap<uint32_t, time_point<steady_clock>> pendingPings;
-        bool emulated;
 
         // --- small helper to clamp a float into ±maxRange ---
         static float clampFloat(float in, float maxRange)
@@ -169,6 +168,27 @@ namespace rollback
             std::shared_ptr<PlayerInfo> player,
             ServerMessageType type,
             const ServerMessageVariant& payload);
+
+        //p2p
+        // Proxy methods for non-host players
+        asio::awaitable<void> forwardToHost(
+            const std::vector<uint8_t>& buffer,
+            size_t bytesReceived);
+
+        asio::awaitable<void> forwardToLocal(
+            const std::vector<uint8_t>& buffer,
+            size_t bytesReceived);
+
+        asio::awaitable<void> initiateUdpHolePunching(
+            MVSIMatchConfig matchConfig);
+
+        std::atomic<bool> host_found_;
+        std::optional<MVSIMatchConfig> http_data_;
+
+        // Proxy state for non-host players
+        std::atomic<bool> is_proxy_mode_;
+        std::optional<udp::endpoint> host_endpoint_;
+        std::optional<udp::endpoint> local_client_endpoint_;
 
         // Fetch match config from HTTP server
         std::optional<MVSIMatchConfig> fetchMatchConfigFromServer(const std::string& matchId, const std::string& key);
