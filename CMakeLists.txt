@@ -6,6 +6,12 @@ project(rollback-server LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(BUILD_SHARED_LIBS OFF)
+
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 if(WIN32)
     message(STATUS "Configuring for Windows")
 elseif(APPLE)
@@ -14,15 +20,28 @@ elseif(UNIX)
     message(STATUS "Configuring for Linux")
 endif()
 
-find_package(asio REQUIRED) # Standalone Asio
+find_package(asio REQUIRED)
 find_package(CURL REQUIRED)
 find_package(ZLIB REQUIRED)
 
 include_directories(${ASIO_INCLUDE_DIR} include)
 
 file(GLOB SOURCES src/*.cpp)
+file(GLOB_RECURSE HEADERS include/*.h include/*.hpp)
 
-add_executable(rollback-server ${SOURCES})
+add_executable(rollback-server ${SOURCES} ${HEADERS})
+
+source_group(
+  TREE "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PREFIX "Header Files"
+  FILES ${HEADERS}
+)
+
+source_group(
+  TREE "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  PREFIX "Source Files"
+  FILES ${SOURCES}
+)
 
 target_link_libraries(rollback-server
     PRIVATE
